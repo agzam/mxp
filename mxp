@@ -9,6 +9,8 @@ set -euo pipefail
 VERSION="0.5.3"
 CHUNK_SIZE=100
 STREAM_TIMEOUT=0.3
+MXP_PORT="${MXP_PORT:-17394}"
+MXP_SOCK_FD=""
 
 usage() {
   cat << EOF
@@ -191,15 +193,7 @@ self_update() {
   echo "Backup saved at: ${backup}"
 }
 
-check_emacsclient() {
-  if ! command -v emacsclient &> /dev/null; then
-    die "emacsclient not found. Please install Emacs."
-  fi
-  
-  if ! emacsclient --eval "t" &> /dev/null; then
-    die "Cannot connect to Emacs server. Start Emacs daemon with: emacs --daemon"
-  fi
-}
+
 
 # Detect if argument is a file/directory path (vs buffer name)
 is_path() {
@@ -231,14 +225,149 @@ encode_for_elisp() {
   fi
 }
 
+# --- Socket transport layer ---
+# Boots a TCP eval server inside Emacs (idempotent - safe to call repeatedly)
+mxp_server_start() {
+  local port="$MXP_PORT"
+  local elisp
+  read -r -d '' elisp <<'MXP_ELISP' || true
+(unless (and (boundp 'mxp-server-process)
+             mxp-server-process
+             (process-live-p mxp-server-process))
+  (defvar mxp-server-port MXP_PORT_PLACEHOLDER)
+  (defvar mxp-server-process nil)
+  (defun mxp--server-filter (proc input)
+    (let ((buf (concat (or (process-get proc :mxp-buf) "") input)))
+      (process-put proc :mxp-buf nil)
+      (while (string-match "\n" buf)
+        (let* ((line (substring buf 0 (match-beginning 0)))
+               (rest (substring buf (match-end 0)))
+               (code (ignore-errors
+                       (decode-coding-string
+                        (base64-decode-string line) 'utf-8)))
+               (resp
+                (if (null code)
+                    (concat "ERR "
+                            (base64-encode-string "invalid request" t))
+                  (condition-case err
+                      (let ((result (eval (read code))))
+                        (concat "OK "
+                                (base64-encode-string
+                                 (encode-coding-string
+                                  (format "%S" result) 'utf-8)
+                                 t)))
+                    (error
+                     (concat "ERR "
+                             (base64-encode-string
+                              (encode-coding-string
+                               (error-message-string err) 'utf-8)
+                              t)))))))
+          (process-send-string proc (concat resp "\n"))
+          (setq buf rest)))
+      (when (< 0 (length buf))
+        (process-put proc :mxp-buf buf))))
+  (defun mxp--server-sentinel (proc event)
+    (process-put proc :mxp-buf nil))
+  (setq mxp-server-process
+        (make-network-process
+         :name "mxp-server"
+         :server t
+         :host "127.0.0.1"
+         :service mxp-server-port
+         :family 'ipv4
+         :coding 'utf-8
+         :filter #'mxp--server-filter
+         :sentinel #'mxp--server-sentinel
+         :noquery t)))
+mxp-server-port
+MXP_ELISP
+  elisp="${elisp//MXP_PORT_PLACEHOLDER/$port}"
+  local encoded
+  encoded=$(printf '%s' "$elisp" | encode_for_elisp)
+  emacsclient --eval \
+    "(eval (read (decode-coding-string (base64-decode-string \"$encoded\") 'utf-8)))" \
+    >/dev/null 2>&1 || return 1
+  sleep 0.1
+  return 0
+}
+
+# Open a persistent TCP connection to the mxp server
+mxp_connect() {
+  [ -n "$MXP_SOCK_FD" ] && return 0
+  { exec 3<>/dev/tcp/127.0.0.1/"$MXP_PORT"; } 2>/dev/null || return 1
+  MXP_SOCK_FD=3
+  return 0
+}
+
+# Close the socket
+mxp_disconnect() {
+  if [ -n "$MXP_SOCK_FD" ]; then
+    exec 3>&- 2>/dev/null || true
+    MXP_SOCK_FD=""
+  fi
+}
+
+# Connect to an existing server, or bootstrap one in Emacs
+mxp_ensure_connection() {
+  mxp_connect && return 0
+  mxp_server_start || return 1
+  mxp_connect
+}
+
+# Evaluate elisp over the socket. Result on stdout, errors on stderr.
+mxp_sock_eval() {
+  local code="$1"
+  local encoded
+  encoded=$(printf '%s' "$code" | encode_for_elisp)
+  echo "$encoded" >&3
+  local response
+  read -r response <&3 || return 1
+  local status="${response%% *}"
+  local data="${response#* }"
+  local decoded
+  decoded=$(printf '%s' "$data" | base64 --decode 2>/dev/null) || return 1
+  if [ "$status" = "OK" ]; then
+    echo "$decoded"
+    return 0
+  else
+    echo "mxp: emacs error: $decoded" >&2
+    return 1
+  fi
+}
+
+# Evaluate elisp - tries socket first, falls back to emacsclient
+emacs_eval() {
+  local code="$1"
+  if [ -n "$MXP_SOCK_FD" ]; then
+    mxp_sock_eval "$code" && return 0
+    mxp_disconnect
+  fi
+  # Fallback: "$code" preserves embedded quotes as literal characters
+  emacsclient --eval "$code" 2>/dev/null
+}
+
+# Verify Emacs is reachable and set up the best transport
+init_emacs_connection() {
+  if ! command -v emacsclient &> /dev/null; then
+    die "emacsclient not found. Please install Emacs."
+  fi
+  if [ "${MXP_NO_SOCKET:-}" != "1" ]; then
+    mxp_ensure_connection && return 0
+  fi
+  # Socket unavailable - verify emacsclient can reach Emacs
+  if ! emacsclient --eval "t" &> /dev/null; then
+    die "Cannot connect to Emacs server. Start Emacs daemon with: emacs --daemon"
+  fi
+}
+
 # Find buffer by name or regex pattern (returns buffer name, not object)
 find_buffer() {
   local pattern="$1"
-  emacsclient --eval "(let ((buf (or (get-buffer \"$pattern\")
-                                      (car (seq-filter (lambda (b)
-                                                        (string-match-p \"$pattern\" (buffer-name b)))
-                                                      (buffer-list))))))
-                        (when buf (buffer-name buf)))" 2>/dev/null | sed 's/"//g' | grep -v '^nil$' || echo ""
+  emacs_eval "(let ((buf (or (get-buffer \"$pattern\")
+                             (car (seq-filter (lambda (b)
+                                               (string-match-p \"$pattern\" (buffer-name b)))
+                                             (buffer-list))))))
+               (when buf (buffer-name buf)))" | sed 's/"//g' | grep -v '^nil$' || echo ""
 }
 
 # Generate unique buffer name
@@ -249,7 +378,7 @@ generate_buffer_name() {
   
   while true; do
     name="$base $num*"
-    if ! emacsclient --eval "(buffer-live-p (get-buffer \"$name\"))" 2>/dev/null | grep -q 't'; then
+    if ! emacs_eval "(buffer-live-p (get-buffer \"$name\"))" | grep -q 't'; then
       echo "$name"
       return
     fi
@@ -285,7 +414,7 @@ resolve_buffer_name() {
   
   while true; do
     candidate="${base}<${num}>"
-    if ! emacsclient --eval "(buffer-live-p (get-buffer \"$candidate\"))" 2>/dev/null | grep -q 't'; then
+    if ! emacs_eval "(buffer-live-p (get-buffer \"$candidate\"))" | grep -q 't'; then
       echo "$candidate"
       return
     fi
@@ -297,8 +426,6 @@ resolve_buffer_name() {
 read_mode() {
   local pattern="$1"
   
-  check_emacsclient
-  
   local buffer
   buffer=$(find_buffer "$pattern")
   
@@ -306,7 +433,7 @@ read_mode() {
     die "No buffer matching '$pattern' found"
   fi
   
-  # Get buffer content via temporary file (avoids emacsclient output limits and base64 overhead)
+  # Get buffer content via temporary file (avoids output limits and base64 overhead)
   local temp_file
   temp_file=$(mktemp)
   
@@ -314,7 +441,7 @@ read_mode() {
   trap "rm -f '$temp_file'" EXIT INT TERM
   
   # Write buffer to temp file with explicit UTF-8 encoding to avoid prompts
-  if ! emacsclient --eval "(let ((coding-system-for-write 'utf-8))
+  if ! emacs_eval "(let ((coding-system-for-write 'utf-8))
     (with-current-buffer \"$buffer\"
       (write-region (point-min) (point-max) \"$temp_file\" nil 'quiet)))" > /dev/null 2>&1; then
     die "Failed to read buffer '$buffer'"
@@ -327,8 +454,6 @@ read_mode() {
 # Open mode: open file or directory in Emacs
 open_mode() {
   local path="$1"
-  
-  check_emacsclient
   
   # Expand ~ to home directory if needed
   if [[ "$path" == "~"* ]]; then
@@ -345,14 +470,13 @@ open_mode() {
     die "Path does not exist: $path"
   fi
   
-  # Open in Emacs (no-wait mode)
+  # Open in Emacs (emacsclient -n handles frame management and interactive prompts
+  # correctly, unlike find-file from a process filter context)
   if [ -d "$path" ]; then
-    # Directory - open in dired
-    emacsclient -n "$path" &>/dev/null
+    emacsclient -n "$path" &>/dev/null || die "Failed to open '$path'"
     echo "Opened directory in Emacs: $path"
   else
-    # File - open with find-file
-    emacsclient -n "$path" &>/dev/null
+    emacsclient -n "$path" &>/dev/null || die "Failed to open '$path'"
     echo "Opened file in Emacs: $path"
   fi
 }
@@ -363,8 +487,6 @@ write_mode() {
   local append="$2"
   local prepend="$3"
   local force="$4"
-  
-  check_emacsclient
   
   local buffer_name
   if [ -z "$buffer_pattern" ]; then
@@ -389,50 +511,35 @@ write_mode() {
   
   # Create/prepare buffer
   if [ "$append" = "true" ]; then
-    emacsclient --eval "(with-current-buffer (get-buffer-create \"$buffer_name\")
+    emacs_eval "(with-current-buffer (get-buffer-create \"$buffer_name\")
       (goto-char (point-max))
       nil)" > /dev/null 2>&1
   elif [ "$prepend" = "true" ]; then
-    emacsclient --eval "(with-current-buffer (get-buffer-create \"$buffer_name\")
+    emacs_eval "(with-current-buffer (get-buffer-create \"$buffer_name\")
       (goto-char (point-min))
       nil)" > /dev/null 2>&1
   else
-    emacsclient --eval "(with-current-buffer (get-buffer-create \"$buffer_name\")
+    emacs_eval "(with-current-buffer (get-buffer-create \"$buffer_name\")
       (erase-buffer)
       nil)" > /dev/null 2>&1
   fi
   
   # Display buffer
-  emacsclient --eval "(display-buffer \"$buffer_name\")" > /dev/null 2>&1
+  emacs_eval "(display-buffer \"$buffer_name\")" > /dev/null 2>&1
   
   # Helper function to flush accumulated content to Emacs
   flush_to_emacs() {
     if [ -n "$accumulated_content" ] && [ "$line_count" -gt 0 ]; then
       local encoded
       encoded=$(printf '%s' "$accumulated_content" | encode_for_elisp)
-      
-      # Send synchronously for small chunks, async for large streams
-      if [ "$total_flushes" -lt 3 ]; then
-        # First few flushes: synchronous (prevents issues with &>/dev/null)
-        emacsclient --eval "(with-current-buffer \"$buffer_name\"
-          (let ((start (goto-char $insert_point))
-                (dstr (decode-coding-string (base64-decode-string \"$encoded\") 'utf-8)))
-            (insert dstr)
-            (when (boundp 'mxp-buffer-update-hook)
-              (run-hook-with-args 'mxp-buffer-update-hook \"$buffer_name\" start (point)))))" >/dev/null 2>&1
-      else
-        # Many flushes: use background jobs for performance
-        while [ $(jobs -r | wc -l | tr -d ' ') -ge 5 ]; do
-          sleep 0.01
-        done
-        emacsclient --eval "(with-current-buffer \"$buffer_name\"
-          (let ((start (goto-char $insert_point))
-                (dstr (decode-coding-string (base64-decode-string \"$encoded\") 'utf-8)))
-            (insert dstr)
-            (when (boundp 'mxp-buffer-update-hook)
-              (run-hook-with-args 'mxp-buffer-update-hook \"$buffer_name\" start (point)))))" >/dev/null 2>&1 &
-      fi
-      
+
+      emacs_eval "(with-current-buffer \"$buffer_name\"
+        (let ((start (goto-char $insert_point))
+              (dstr (decode-coding-string (base64-decode-string \"$encoded\") 'utf-8)))
+          (insert dstr)
+          (when (boundp 'mxp-buffer-update-hook)
+            (run-hook-with-args 'mxp-buffer-update-hook \"$buffer_name\" start (point)))))" >/dev/null 2>&1
+
       accumulated_content=""
       line_count=0
       total_flushes=$((total_flushes + 1))
@@ -487,15 +594,14 @@ write_mode() {
     fi
   done
   
-  # Wait for all background jobs to complete
-  wait
-  
   # Run hooks
-  emacsclient --eval "(with-current-buffer \"$buffer_name\"
+  emacs_eval "(with-current-buffer \"$buffer_name\"
     (when (boundp 'mxp-buffer-hook)
       (run-hook-with-args 'mxp-buffer-hook \"$buffer_name\"))
     (when (boundp 'mxp-buffer-complete-hook)
       (run-hook-with-args 'mxp-buffer-complete-hook \"$buffer_name\")))" > /dev/null 2>&1
+
+  mxp_disconnect
 }
 main() {
   local mode="write"
@@ -562,7 +668,11 @@ main() {
   if [ "$append" = "true" ] && [ "$prepend" = "true" ]; then
     die "Cannot use both --append and --prepend"
   fi
-  
+
+  # Initialize connection to Emacs (socket with emacsclient fallback)
+  init_emacs_connection
+  trap 'mxp_disconnect' EXIT
+
   # Execute mode
   if [ "$mode" = "read" ]; then
     if [ -z "$buffer_pattern" ]; then
