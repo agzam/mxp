@@ -18,6 +18,7 @@ Pipe content between your terminal and Emacs buffers - seamlessly bridge your co
 - *Buffer matching*: Use exact names or regex patterns to find buffers
 - *Auto-generation*: Creates ~*Piper 1*~, ~*Piper 2*~, etc. when no name specified
 - *Conflict handling*: Avoids overwriting buffers unless forced
+- *Persistent socket*: Auto-boots a TCP eval server inside Emacs for fast, ordered communication (falls back to ~emacsclient~ transparently)
 
 The script works with both bash and zsh, handles special characters properly, and includes comprehensive error handling.
 
@@ -87,6 +88,30 @@ Download and put it somewhere in the $PATH
   #+end_src
 
 Make sure [[https://www.gnu.org/software/emacs/manual/html_node/emacs/Emacs-Server.html][Emacs daemon]] is running and emacsclient works!
+
+** Socket transport
+
+On first use, ~mxp~ boots a lightweight TCP eval server inside your running Emacs and connects to it directly via bash's ~/dev/tcp~. All subsequent calls reuse this persistent connection, which means:
+
+- No process spawning per eval (previously each chunk launched a new ~emacsclient~ process)
+- Guaranteed ordering for streamed content (no more background job races)
+- No "Connection refused" errors under heavy streaming load
+
+The server starts automatically - no manual ~M-x~ step required. If the socket is unavailable (e.g., bash built without ~/dev/tcp~ support), ~mxp~ falls back to ~emacsclient~ transparently.
+
+#+attr_html: :width 50%
+| Variable      | Default | Description                                   |
+|---------------+---------+-----------------------------------------------|
+| ~MXP_PORT~      | ~17394~   | TCP port for the eval server (localhost only) |
+| ~MXP_NO_SOCKET~ | (unset) | Set to ~1~ to force ~emacsclient~-only mode       |
+
+To stop the server manually:
+
+#+begin_src emacs-lisp
+(when (and (boundp 'mxp-server-process) (process-live-p mxp-server-process))
+  (delete-process mxp-server-process)
+  (setq mxp-server-process nil))
+#+end_src
 
 ** Use
 

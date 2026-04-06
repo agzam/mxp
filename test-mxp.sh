@@ -594,6 +594,151 @@ else
   fail "Temp files not cleaned up: before=$before, after=$after"
 fi
 
+# --- Socket Transport Tests ---
+
+section "Test 24: Socket Server Bootstrap"
+if should_run_test "socket"; then
+  if [ "$LIST_TESTS" = true ]; then
+    echo "  [socket] Socket server bootstrap"
+  else
+    # Stop any existing mxp server to test fresh bootstrap
+    emacsclient --eval "(when (and (boundp 'mxp-server-process) mxp-server-process (process-live-p mxp-server-process)) (delete-process mxp-server-process) (setq mxp-server-process nil))" &>/dev/null || true
+
+    cleanup_buffer "*test-socket-boot*"
+    echo "socket boot test" | $SCRIPT "*test-socket-boot*" &>/dev/null
+
+    if buffer_exists "*test-socket-boot*"; then
+      pass "Socket server auto-bootstraps on first use"
+    else
+      fail "Socket server bootstrap failed"
+    fi
+
+    # Verify server is running in Emacs
+    server_alive=$(emacsclient --eval "(and (boundp 'mxp-server-process) mxp-server-process (process-live-p mxp-server-process))" 2>/dev/null)
+    if [[ "$server_alive" != "nil" ]]; then
+      pass "Server process is alive in Emacs after bootstrap"
+    else
+      fail "Server process not found in Emacs"
+    fi
+  fi
+fi
+
+section "Test 25: Socket Eval Round-trip"
+if should_run_test "socket"; then
+  if [ "$LIST_TESTS" = true ]; then
+    echo "  [socket] Socket eval round-trip"
+  else
+    cleanup_buffer "*test-socket-rt*"
+    echo "round trip content" | $SCRIPT "*test-socket-rt*" &>/dev/null
+    output=$($SCRIPT --from "*test-socket-rt*" 2>/dev/null)
+    if [[ "$output" == *"round trip content"* ]]; then
+      pass "Write and read via socket transport"
+    else
+      fail "Socket round-trip failed: got '$output'"
+    fi
+  fi
+fi
+
+section "Test 26: Socket Streaming"
+if should_run_test "socket"; then
+  if [ "$LIST_TESTS" = true ]; then
+    echo "  [socket] Socket streaming (1000 lines)"
+  else
+    cleanup_buffer "*test-socket-stream*"
+    seq 1 1000 | $SCRIPT "*test-socket-stream*" &>/dev/null
+    output=$($SCRIPT --from "*test-socket-stream*" 2>/dev/null)
+    line_count=$(echo "$output" | wc -l | tr -d ' ')
+
+    if [ "$line_count" = "1000" ]; then
+      pass "1000 lines streamed over socket in order"
+    else
+      fail "Socket streaming: expected 1000 lines, got $line_count"
+    fi
+
+    # Verify first and last lines
+    first=$(echo "$output" | head -1)
+    last=$(echo "$output" | tail -1)
+    if [ "$first" = "1" ] && [ "$last" = "1000" ]; then
+      pass "Stream ordering preserved (first=1, last=1000)"
+    else
+      fail "Stream order wrong: first='$first', last='$last'"
+    fi
+  fi
+fi
+
+section "Test 27: Emacsclient Fallback"
+if should_run_test "socket"; then
+  if [ "$LIST_TESTS" = true ]; then
+    echo "  [socket] Emacsclient fallback with MXP_NO_SOCKET=1"
+  else
+    cleanup_buffer "*test-fallback*"
+    echo "fallback content" | MXP_NO_SOCKET=1 $SCRIPT "*test-fallback*" &>/dev/null
+    output=$(MXP_NO_SOCKET=1 $SCRIPT --from "*test-fallback*" 2>/dev/null)
+
+    if [[ "$output" == *"fallback content"* ]]; then
+      pass "MXP_NO_SOCKET=1 falls back to emacsclient"
+    else
+      fail "Fallback failed: got '$output'"
+    fi
+
+    # Verify streaming also works in fallback
+    cleanup_buffer "*test-fallback-stream*"
+    seq 1 50 | MXP_NO_SOCKET=1 $SCRIPT "*test-fallback-stream*" &>/dev/null
+    output=$(MXP_NO_SOCKET=1 $SCRIPT --from "*test-fallback-stream*" 2>/dev/null)
+    line_count=$(echo "$output" | wc -l | tr -d ' ')
+
+    if [ "$line_count" = "50" ]; then
+      pass "Streaming works in fallback mode (50 lines)"
+    else
+      fail "Fallback streaming: expected 50 lines, got $line_count"
+    fi
+  fi
+fi
+
+section "Test 28: Server Idempotence"
+if should_run_test "socket"; then
+  if [ "$LIST_TESTS" = true ]; then
+    echo "  [socket] Server idempotence"
+  else
+    # Run mxp twice - server should already exist, no error
+    # Buffer names must be regex-distinct (trailing * in Emacs regex
+    # means "zero or more of preceding char", so *foo-1* matches *foo-*)
+    cleanup_buffer "*test-idemp-alpha*"
+    cleanup_buffer "*test-idemp-beta*"
+    echo "first" | $SCRIPT "*test-idemp-alpha*" &>/dev/null
+    echo "second" | $SCRIPT "*test-idemp-beta*" &>/dev/null
+
+    out1=$($SCRIPT --from "*test-idemp-alpha*" 2>/dev/null)
+    out2=$($SCRIPT --from "*test-idemp-beta*" 2>/dev/null)
+
+    if [[ "$out1" == *"first"* ]] && [[ "$out2" == *"second"* ]]; then
+      pass "Multiple mxp invocations reuse existing server"
+    else
+      fail "Server idempotence failed"
+    fi
+  fi
+fi
+
+section "Test 29: Custom Port"
+if should_run_test "socket"; then
+  if [ "$LIST_TESTS" = true ]; then
+    echo "  [socket] Custom MXP_PORT"
+  else
+    cleanup_buffer "*test-custom-port*"
+    echo "custom port" | MXP_PORT=17395 $SCRIPT "*test-custom-port*" &>/dev/null
+    output=$(MXP_PORT=17395 $SCRIPT --from "*test-custom-port*" 2>/dev/null)
+
+    if [[ "$output" == *"custom port"* ]]; then
+      pass "MXP_PORT override works"
+    else
+      fail "Custom port failed: got '$output'"
+    fi
+
+    # Clean up the extra server
+    emacsclient --eval "(when (and (boundp 'mxp-server-process) mxp-server-process) (delete-process mxp-server-process) (setq mxp-server-process nil))" &>/dev/null || true
+  fi
+fi
+
 # Summary
 section "Test Summary"
 echo ""

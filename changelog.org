@@ -3,6 +3,27 @@
 #+DATE: 2025
 
 All notable changes to this project will be documented in this file.
+
+* [0.6.0] - 2026-04-06
+
+** Added
+- Persistent TCP socket transport between ~mxp~ and Emacs
+- Auto-bootstrapping: ~mxp~ starts a lightweight eval server inside Emacs on first use (no manual ~M-x~ required)
+- All communication goes over a single persistent connection per invocation via bash's ~/dev/tcp~
+- Transparent fallback to ~emacsclient~ when socket is unavailable
+- ~MXP_PORT~ env var for custom server port (default: 17394)
+- ~MXP_NO_SOCKET~ env var to force ~emacsclient~-only mode
+- Socket transport test suite
+
+** Changed
+- Streaming now sends all chunks sequentially over one socket - guaranteed ordering, no race conditions
+- ~open_mode~ uses ~emacsclient -n~ directly (avoids interactive prompts from process filter context)
+
+** Removed
+- Background job concurrency limiter (~jobs -r~ / ~sleep 0.01~ spin-wait) - no longer needed with persistent connection
+- Sync/async flush split - all flushes are now uniform
+- ~wait~ at end of ~write_mode~ - no background jobs to collect
+
 * [0.5.3] - 2025-10-29
 - Correctly handles emojis and other utf-8 chars
   
