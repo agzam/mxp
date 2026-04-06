@@ -11,6 +11,7 @@ CHUNK_SIZE=100
 STREAM_TIMEOUT=0.3
 MXP_PORT="${MXP_PORT:-17394}"
 MXP_SOCK_FD=""
+EMACS_SOCKET_NAME="${EMACS_SOCKET_NAME:-}"
 
 usage() {
   cat << EOF
@@ -31,6 +32,7 @@ OPTIONS:
   -f, --from BUFFER     Read from buffer (name or regex) and output to stdout
   -a, --append          Append to buffer instead of replacing content
   -p, --prepend         Prepend to buffer (insert at the beginning)
+  -s, --socket-name NAME  Connect to Emacs daemon socket NAME
   -F, --force           Overwrite existing buffer (skip conflict resolution)
   -h, --help            Show this help message
   -v, --version         Show version
@@ -83,6 +85,15 @@ EOF
 die() {
   echo "Error: $*" >&2
   exit 1
+}
+
+# Wrapper for emacsclient - passes -s flag when socket name is set
+run_emacsclient() {
+  if [ -n "$EMACS_SOCKET_NAME" ]; then
+    command emacsclient -s "$EMACS_SOCKET_NAME" "$@"
+  else
+    command emacsclient "$@"
+  fi
 }
 
 # Find the actual script location, resolving symlinks
@@ -284,7 +295,7 @@ MXP_ELISP
   elisp="${elisp//MXP_PORT_PLACEHOLDER/$port}"
   local encoded
   encoded=$(printf '%s' "$elisp" | encode_for_elisp)
-  emacsclient --eval \
+  run_emacsclient --eval \
     "(eval (read (decode-coding-string (base64-decode-string \"$encoded\") 'utf-8)))" \
     >/dev/null 2>&1 || return 1
   sleep 0.1
@@ -343,7 +354,7 @@ emacs_eval() {
     mxp_disconnect
   fi
   # Fallback: "$code" preserves embedded quotes as literal characters
-  emacsclient --eval "$code" 2>/dev/null
+  run_emacsclient --eval "$code" 2>/dev/null
 }
 
 # Verify Emacs is reachable and set up the best transport
@@ -355,7 +366,7 @@ init_emacs_connection() {
     mxp_ensure_connection && return 0
   fi
   # Socket unavailable - verify emacsclient can reach Emacs
-  if ! emacsclient --eval "t" &> /dev/null; then
+  if ! run_emacsclient --eval "t" &> /dev/null; then
     die "Cannot connect to Emacs server. Start Emacs daemon with: emacs --daemon"
   fi
 }
@@ -473,10 +484,10 @@ open_mode() {
   # Open in Emacs (emacsclient -n handles frame management and interactive prompts
   # correctly, unlike find-file from a process filter context)
   if [ -d "$path" ]; then
-    emacsclient -n "$path" &>/dev/null || die "Failed to open '$path'"
+    run_emacsclient -n "$path" &>/dev/null || die "Failed to open '$path'"
     echo "Opened directory in Emacs: $path"
   else
-    emacsclient -n "$path" &>/dev/null || die "Failed to open '$path'"
+    run_emacsclient -n "$path" &>/dev/null || die "Failed to open '$path'"
     echo "Opened file in Emacs: $path"
   fi
 }
@@ -634,6 +645,10 @@ main() {
         ;;
       -p|--prepend)
         prepend="true"
+        ;;
+      -s|--socket-name)
+        shift
+        EMACS_SOCKET_NAME="$1"
         ;;
       -F|--force)
         force="true"

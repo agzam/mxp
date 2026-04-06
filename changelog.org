@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file.
 * [0.6.0] - 2026-04-06
 
 ** Added
+- ~-s~ / ~--socket-name~ flag and ~EMACS_SOCKET_NAME~ env var for connecting to a named Emacs daemon socket ([[https://github.com/agzam/mxp/issues/1][#1]])
 - Persistent TCP socket transport between ~mxp~ and Emacs
 - Auto-bootstrapping: ~mxp~ starts a lightweight eval server inside Emacs on first use (no manual ~M-x~ required)
 - All communication goes over a single persistent connection per invocation via bash's ~/dev/tcp~

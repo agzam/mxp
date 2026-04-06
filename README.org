@@ -100,10 +100,20 @@ On first use, ~mxp~ boots a lightweight TCP eval server inside your running Emac
 The server starts automatically - no manual ~M-x~ step required. If the socket is unavailable (e.g., bash built without ~/dev/tcp~ support), ~mxp~ falls back to ~emacsclient~ transparently.
 
 #+attr_html: :width 50%
-| Variable      | Default | Description                                   |
-|---------------+---------+-----------------------------------------------|
-| ~MXP_PORT~      | ~17394~   | TCP port for the eval server (localhost only) |
-| ~MXP_NO_SOCKET~ | (unset) | Set to ~1~ to force ~emacsclient~-only mode       |
+| Variable          | Default | Description                                         |
+|-------------------+---------+-----------------------------------------------------|
+| ~MXP_PORT~          | ~17394~   | TCP port for the eval server (localhost only)       |
+| ~MXP_NO_SOCKET~     | (unset) | Set to ~1~ to force ~emacsclient~-only mode             |
+| ~EMACS_SOCKET_NAME~ | (unset) | Named socket for ~emacsclient -s~ (e.g., daemon name) |
+
+You can also pass ~-s~ / ~--socket-name~ on the command line:
+
+#+begin_src shell
+echo "hello" | mxp -s myserver "*my-buffer*"
+mxp --socket-name myserver --from "*my-buffer*"
+#+end_src
+
+This is useful when the Emacs daemon was started with a specific socket name, e.g., ~emacs --daemon=myserver~.
 
 To stop the server manually:
 

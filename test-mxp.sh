@@ -182,6 +182,12 @@ else
   fail "Version missing"
 fi
 
+if $SCRIPT --help | grep -q "\-s, --socket-name"; then
+  pass "Help shows -s/--socket-name option"
+else
+  fail "Help missing -s/--socket-name option"
+fi
+
 # Test 2: Write mode - pipe to new buffer
 section "Test 2: Write Mode - Create Buffer"
 cleanup_buffer "*test-buffer*"
@@ -736,6 +742,59 @@ if should_run_test "socket"; then
 
     # Clean up the extra server
     emacsclient --eval "(when (and (boundp 'mxp-server-process) mxp-server-process) (delete-process mxp-server-process) (setq mxp-server-process nil))" &>/dev/null || true
+  fi
+fi
+
+section "Test 30: Socket Name CLI Flag"
+if should_run_test "socket"; then
+  if [ "$LIST_TESTS" = true ]; then
+    echo "  [socket] Socket name -s flag"
+  else
+    # Use -s server (default socket name) with emacsclient fallback to verify
+    # the flag plumbing works end-to-end
+    cleanup_buffer "*test-socket-name-flag*"
+    echo "socket name flag test" | MXP_NO_SOCKET=1 $SCRIPT -s server "*test-socket-name-flag*" &>/dev/null
+    output=$(MXP_NO_SOCKET=1 $SCRIPT -s server --from "*test-socket-name-flag*" 2>/dev/null)
+
+    if [[ "$output" == *"socket name flag test"* ]]; then
+      pass "Write/read round-trip with -s flag works"
+    else
+      fail "Socket name -s flag failed: got '$output'"
+    fi
+  fi
+fi
+
+section "Test 31: Socket Name Env Var"
+if should_run_test "socket"; then
+  if [ "$LIST_TESTS" = true ]; then
+    echo "  [socket] EMACS_SOCKET_NAME env var"
+  else
+    cleanup_buffer "*test-socket-name-env*"
+    echo "socket name env test" | MXP_NO_SOCKET=1 EMACS_SOCKET_NAME=server $SCRIPT "*test-socket-name-env*" &>/dev/null
+    output=$(MXP_NO_SOCKET=1 EMACS_SOCKET_NAME=server $SCRIPT --from "*test-socket-name-env*" 2>/dev/null)
+
+    if [[ "$output" == *"socket name env test"* ]]; then
+      pass "Write/read round-trip with EMACS_SOCKET_NAME env var works"
+    else
+      fail "EMACS_SOCKET_NAME env var failed: got '$output'"
+    fi
+  fi
+fi
+
+section "Test 32: Socket Name --socket-name Long Flag"
+if should_run_test "socket"; then
+  if [ "$LIST_TESTS" = true ]; then
+    echo "  [socket] Socket name --socket-name long flag"
+  else
+    cleanup_buffer "*test-socket-name-long*"
+    echo "long flag test" | MXP_NO_SOCKET=1 $SCRIPT --socket-name server "*test-socket-name-long*" &>/dev/null
+    output=$(MXP_NO_SOCKET=1 $SCRIPT --socket-name server --from "*test-socket-name-long*" 2>/dev/null)
+
+    if [[ "$output" == *"long flag test"* ]]; then
+      pass "Write/read round-trip with --socket-name flag works"
+    else
+      fail "Socket name --socket-name long flag failed: got '$output'"
+    fi
   fi
 fi
 
